@@ -65,6 +65,13 @@ async function authenticate(): Promise<void> {
       if (reason === DisconnectReason.loggedOut) {
         console.log('\n✗ Logged out. Delete store/auth and try again.');
         process.exit(1);
+      } else if (
+        reason === DisconnectReason.restartRequired ||
+        reason === 515
+      ) {
+        console.log('\nReconnecting...');
+        authenticate();
+        return;
       } else {
         console.log('\n✗ Connection failed. Please try again.');
         process.exit(1);

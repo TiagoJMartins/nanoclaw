@@ -52,6 +52,7 @@ export interface NewMessage {
   sender_name: string;
   content: string;
   timestamp: string;
+  is_from_me: number;
 }
 
 export interface ScheduledTask {

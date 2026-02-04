@@ -11,6 +11,7 @@ import makeWASocket, {
 
 import {
   ASSISTANT_NAME,
+  CONTAINER_RUNTIME,
   DATA_DIR,
   IPC_POLL_INTERVAL,
   MAIN_GROUP_FOLDER,
@@ -210,6 +211,7 @@ async function processMessage(msg: NewMessage): Promise<void> {
     'Processing message',
   );
 
+  await sendReaction(msg, '\u{1F440}'); // 👀
   await setTyping(msg.chat_jid, true);
   const response = await runAgent(group, prompt, msg.chat_jid);
   await setTyping(msg.chat_jid, false);
@@ -218,6 +220,7 @@ async function processMessage(msg: NewMessage): Promise<void> {
     lastAgentTimestamp[msg.chat_jid] = msg.timestamp;
     await sendMessage(msg.chat_jid, `${ASSISTANT_NAME}: ${response}`);
   }
+  await sendReaction(msg, '\u{2705}'); // ✅
 }
 
 async function runAgent(
@@ -279,6 +282,24 @@ async function runAgent(
   } catch (err) {
     logger.error({ group: group.name, err }, 'Agent error');
     return null;
+  }
+}
+
+async function sendReaction(msg: NewMessage, emoji: string): Promise<void> {
+  try {
+    await sock.sendMessage(msg.chat_jid, {
+      react: {
+        text: emoji,
+        key: {
+          remoteJid: msg.chat_jid,
+          id: msg.id,
+          fromMe: !!msg.is_from_me,
+          participant: msg.is_from_me ? undefined : msg.sender,
+        },
+      },
+    });
+  } catch (err) {
+    logger.error({ err }, 'Failed to send reaction');
   }
 }
 
@@ -718,6 +739,8 @@ async function connectWhatsApp(): Promise<void> {
   sock.ev.on('messages.upsert', ({ messages }) => {
     for (const msg of messages) {
       if (!msg.message) continue;
+      // Skip reaction and protocol messages - they have no text content
+      if (msg.message.reactionMessage || msg.message.protocolMessage) continue;
       const rawJid = msg.key.remoteJid;
       if (!rawJid || rawJid === 'status@broadcast') continue;
 
@@ -745,7 +768,7 @@ async function connectWhatsApp(): Promise<void> {
 }
 
 async function startMessageLoop(): Promise<void> {
-  logger.info(`NanoClaw running (trigger: @${ASSISTANT_NAME})`);
+  logger.info(`NanoClaw running (trigger: ${ASSISTANT_NAME})`);
 
   while (true) {
     try {
@@ -776,48 +799,39 @@ async function startMessageLoop(): Promise<void> {
   }
 }
 
-function ensureContainerSystemRunning(): void {
+function ensureContainerRuntimeReady(): void {
   try {
-    execSync('container system status', { stdio: 'pipe' });
-    logger.debug('Apple Container system already running');
+    execSync(`${CONTAINER_RUNTIME} info`, { stdio: 'pipe', timeout: 10000 });
+    logger.debug(`Container runtime ready: ${CONTAINER_RUNTIME}`);
   } catch {
-    logger.info('Starting Apple Container system...');
-    try {
-      execSync('container system start', { stdio: 'pipe', timeout: 30000 });
-      logger.info('Apple Container system started');
-    } catch (err) {
-      logger.error({ err }, 'Failed to start Apple Container system');
-      console.error(
-        '\n╔════════════════════════════════════════════════════════════════╗',
-      );
-      console.error(
-        '║  FATAL: Apple Container system failed to start                 ║',
-      );
-      console.error(
-        '║                                                                ║',
-      );
-      console.error(
-        '║  Agents cannot run without Apple Container. To fix:           ║',
-      );
-      console.error(
-        '║  1. Install from: https://github.com/apple/container/releases ║',
-      );
-      console.error(
-        '║  2. Run: container system start                               ║',
-      );
-      console.error(
-        '║  3. Restart NanoClaw                                          ║',
-      );
-      console.error(
-        '╚════════════════════════════════════════════════════════════════╝\n',
-      );
-      throw new Error('Apple Container system is required but failed to start');
-    }
+    logger.error(`Container runtime not available: ${CONTAINER_RUNTIME}`);
+    console.error(
+      '\n╔════════════════════════════════════════════════════════════════╗',
+    );
+    console.error(
+      `║  FATAL: ${CONTAINER_RUNTIME} is not running                                  ║`,
+    );
+    console.error(
+      '║                                                                ║',
+    );
+    console.error(
+      '║  Agents cannot run without a container runtime. To fix:       ║',
+    );
+    console.error(
+      '║  - Podman: podman machine start                               ║',
+    );
+    console.error(
+      '║  - Docker: start Docker Desktop or systemctl start docker     ║',
+    );
+    console.error(
+      '╚════════════════════════════════════════════════════════════════╝\n',
+    );
+    throw new Error(`${CONTAINER_RUNTIME} is required but not running`);
   }
 }
 
 async function main(): Promise<void> {
-  ensureContainerSystemRunning();
+  ensureContainerRuntimeReady();
   initDatabase();
   logger.info('Database initialized');
   loadState();
