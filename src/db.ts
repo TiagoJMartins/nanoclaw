@@ -62,6 +62,14 @@ export function initDatabase(): void {
     CREATE INDEX IF NOT EXISTS idx_task_run_logs ON task_run_logs(task_id, run_at);
   `);
 
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS processed_emails (
+      message_id TEXT PRIMARY KEY,
+      folder TEXT NOT NULL,
+      processed_at TEXT NOT NULL
+    );
+  `);
+
   // Add sender_name column if it doesn't exist (migration for existing DBs)
   try {
     db.exec(`ALTER TABLE messages ADD COLUMN sender_name TEXT`);
@@ -393,4 +401,17 @@ export function getTaskRunLogs(taskId: string, limit = 10): TaskRunLog[] {
   `,
     )
     .all(taskId, limit) as TaskRunLog[];
+}
+
+// Email deduplication
+export function isEmailProcessed(messageId: string): boolean {
+  return !!db
+    .prepare('SELECT 1 FROM processed_emails WHERE message_id = ?')
+    .get(messageId);
+}
+
+export function markEmailProcessed(messageId: string, folder: string): void {
+  db.prepare(
+    'INSERT OR IGNORE INTO processed_emails (message_id, folder, processed_at) VALUES (?, ?, ?)',
+  ).run(messageId, folder, new Date().toISOString());
 }

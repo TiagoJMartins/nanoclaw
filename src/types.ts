@@ -78,3 +78,31 @@ export interface TaskRunLog {
   result: string | null;
   error: string | null;
 }
+
+export interface EmailConfig {
+  imap: {
+    host: string;
+    port: number;
+    auth: { user: string; pass: string };
+    tls: boolean;
+  };
+  address: string;
+  monitoredFolders: string[];
+  processedFolder: string;
+  draftsFolder: string;
+  fromName: string;
+}
+
+export interface IncomingEmail {
+  uid: number;
+  messageId: string;
+  from: string;
+  fromName: string;
+  to: string[];
+  subject: string;
+  body: string;
+  date: Date;
+  inReplyTo?: string;
+  references?: string;
+  folder: string;
+}

@@ -279,6 +279,42 @@ SCHEDULE VALUE FORMAT (all times are LOCAL timezone):
       ),
 
       tool(
+        'create_email_draft',
+        `Create a draft email reply that will be saved to the Drafts folder for manual review and sending.
+Use this when an incoming email warrants a response. The draft will NOT be sent — the user reviews and sends it manually from their email client.
+
+Include the original email's message_id and references for proper threading.`,
+        {
+          to: z.string().describe('Email address to send the reply to'),
+          subject: z.string().describe('Subject line (usually "Re: original subject")'),
+          body: z.string().describe('The plain text body of the reply'),
+          in_reply_to: z.string().optional().describe('Message-ID of the email being replied to (for threading)'),
+          references: z.string().optional().describe('References header value (for threading)'),
+        },
+        async (args) => {
+          const data = {
+            type: 'create_email_draft',
+            to: args.to,
+            subject: args.subject,
+            body: args.body,
+            inReplyTo: args.in_reply_to || '',
+            references: args.references || '',
+            groupFolder,
+            timestamp: new Date().toISOString(),
+          };
+
+          const filename = writeIpcFile(MESSAGES_DIR, data);
+
+          return {
+            content: [{
+              type: 'text',
+              text: `Email draft queued (${filename}). It will be saved to the Drafts folder for review.`,
+            }],
+          };
+        }
+      ),
+
+      tool(
         'register_group',
         `Register a new WhatsApp group so the agent can respond to messages there. Main group only.
 

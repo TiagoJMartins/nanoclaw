@@ -65,3 +65,30 @@ export const TRIGGER_PATTERN = new RegExp(
 // Uses system timezone by default
 export const TIMEZONE =
   process.env.TZ || Intl.DateTimeFormat().resolvedOptions().timeZone;
+
+// Email channel (optional)
+import type { EmailConfig } from './types.js';
+
+export const EMAIL_ENABLED = process.env.EMAIL_ENABLED === 'true';
+
+export const EMAIL_CONFIG: EmailConfig | null = EMAIL_ENABLED
+  ? {
+      imap: {
+        host: process.env.EMAIL_IMAP_HOST || 'imap.fastmail.com',
+        port: parseInt(process.env.EMAIL_IMAP_PORT || '993', 10),
+        auth: {
+          user: process.env.EMAIL_USER || '',
+          pass: process.env.EMAIL_PASS || '',
+        },
+        tls: true,
+      },
+      address: process.env.EMAIL_ADDRESS || '',
+      monitoredFolders: (process.env.EMAIL_FOLDERS || 'INBOX')
+        .split(',')
+        .map((f) => f.trim()),
+      processedFolder:
+        process.env.EMAIL_PROCESSED_FOLDER || 'INBOX.NanoClaw.Processed',
+      draftsFolder: process.env.EMAIL_DRAFTS_FOLDER || 'Drafts',
+      fromName: process.env.EMAIL_FROM_NAME || ASSISTANT_NAME,
+    }
+  : null;

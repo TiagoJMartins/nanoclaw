@@ -13,6 +13,9 @@ import {
   ASSISTANT_NAME,
   CONTAINER_RUNTIME,
   DATA_DIR,
+  EMAIL_CONFIG,
+  EMAIL_ENABLED,
+  GROUPS_DIR,
   IPC_POLL_INTERVAL,
   MAIN_GROUP_FOLDER,
   POLL_INTERVAL,
@@ -20,6 +23,8 @@ import {
   TIMEZONE,
   TRIGGER_PATTERN,
 } from './config.js';
+import { EmailChannel } from './email-channel.js';
+import type { IncomingEmail } from './types.js';
 import {
   AvailableGroup,
   runContainerAgent,
@@ -53,6 +58,7 @@ let registeredGroups: Record<string, RegisteredGroup> = {};
 let lastAgentTimestamp: Record<string, string> = {};
 // LID to phone number mapping (WhatsApp now sends LID JIDs for self-chats)
 let lidToPhoneMap: Record<string, string> = {};
+let emailChannel: EmailChannel | null = null;
 
 /**
  * Translate a JID from LID format to phone format if we have a mapping.
@@ -312,6 +318,119 @@ async function sendMessage(jid: string, text: string): Promise<void> {
   }
 }
 
+async function processEmails(emails: IncomingEmail[]): Promise<void> {
+  if (emails.length === 0) return;
+
+  // Find the main group entry — emails always route through main
+  const mainEntry = Object.entries(registeredGroups).find(
+    ([, g]) => g.folder === MAIN_GROUP_FOLDER,
+  );
+  if (!mainEntry) {
+    logger.warn('Cannot process emails: main group not registered');
+    return;
+  }
+
+  const [mainJid, mainGroup] = mainEntry;
+
+  const escapeXml = (s: string) =>
+    s
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+
+  const emailXmls = emails.map((email) => `<email>
+<from name="${escapeXml(email.fromName)}">${escapeXml(email.from)}</from>
+<to>${email.to.map(escapeXml).join(', ')}</to>
+<subject>${escapeXml(email.subject)}</subject>
+<date>${email.date instanceof Date ? email.date.toISOString() : email.date}</date>
+<message_id>${escapeXml(email.messageId)}</message_id>
+${email.inReplyTo ? `<in_reply_to>${escapeXml(email.inReplyTo)}</in_reply_to>` : ''}
+${email.references ? `<references>${escapeXml(email.references)}</references>` : ''}
+<folder>${escapeXml(email.folder)}</folder>
+<body>
+${escapeXml(email.body)}
+</body>
+</email>`);
+
+  const today = new Date().toISOString().slice(0, 10);
+
+  const prompt = `<incoming_emails count="${emails.length}">
+${emailXmls.join('\n')}
+</incoming_emails>
+
+You received ${emails.length} new email${emails.length > 1 ? 's' : ''}. Process them silently — do NOT send WhatsApp messages unless something is genuinely urgent.
+
+For each email, decide what to do:
+- Leave it alone — work emails, personal/health emails, and anything that doesn't need your involvement. Just log it.
+- Organize info — save travel itineraries, receipts, confirmations, etc. to relevant files.
+- Draft a reply — if warranted, use create_email_draft to save a draft to the Drafts folder. The user will review and send it manually. NEVER send email directly.
+
+After processing each email, append a one-line summary to /workspace/group/email-activity/${today}.jsonl — one JSON object per line with fields: from, subject, action.
+
+Example log entries:
+{"from":"alice@example.com","subject":"Flight confirmation","action":"saved travel itinerary to trips/"}
+{"from":"boss@work.com","subject":"Q4 report","action":"left alone (work email)"}
+{"from":"newsletter@example.com","subject":"Weekly digest","action":"ignored"}`;
+
+
+  logger.info(
+    { count: emails.length, subjects: emails.map((e) => e.subject) },
+    'Processing email batch through agent',
+  );
+
+  await runAgent(mainGroup, prompt, mainJid);
+}
+
+async function sendDailyEmailSummary(): Promise<void> {
+  const today = new Date().toISOString().slice(0, 10);
+  const logFile = path.join(GROUPS_DIR, 'main', 'email-activity', `${today}.jsonl`);
+
+  if (!fs.existsSync(logFile)) return;
+
+  const mainJid = Object.entries(registeredGroups).find(
+    ([, g]) => g.folder === MAIN_GROUP_FOLDER,
+  )?.[0];
+  if (!mainJid) return;
+
+  try {
+    const lines = fs.readFileSync(logFile, 'utf-8').trim().split('\n').filter(Boolean);
+    if (lines.length === 0) return;
+
+    const bullets = lines.map((line) => {
+      try {
+        const entry = JSON.parse(line);
+        return `• *${entry.from}*: ${entry.subject} — _${entry.action}_`;
+      } catch {
+        return `• ${line}`;
+      }
+    });
+
+    const summary = `${ASSISTANT_NAME}: *Resumo de emails de hoje* (${lines.length})\n\n${bullets.join('\n')}`;
+    await sendMessage(mainJid, summary);
+
+    // Rename to prevent re-sending
+    fs.renameSync(logFile, `${logFile}.sent`);
+    logger.info({ count: lines.length }, 'Daily email summary sent');
+  } catch (err) {
+    logger.error({ err }, 'Failed to send daily email summary');
+  }
+}
+
+function startEmailSummaryTimer(): void {
+  // Check every hour; send summary at 10 PM local time
+  const check = () => {
+    const hour = new Date().getHours();
+    if (hour === 22) {
+      sendDailyEmailSummary().catch((err) =>
+        logger.error({ err }, 'Email summary error'),
+      );
+    }
+  };
+  setInterval(check, 60 * 60 * 1000);
+  logger.info('Email daily summary timer started (22:00 local)');
+}
+
 function startIpcWatcher(): void {
   const ipcBaseDir = path.join(DATA_DIR, 'ipc');
   fs.mkdirSync(ipcBaseDir, { recursive: true });
@@ -364,6 +483,25 @@ function startIpcWatcher(): void {
                   logger.warn(
                     { chatJid: data.chatJid, sourceGroup },
                     'Unauthorized IPC message attempt blocked',
+                  );
+                }
+              } else if (data.type === 'create_email_draft' && emailChannel) {
+                try {
+                  await emailChannel.createDraft({
+                    to: data.to,
+                    subject: data.subject,
+                    body: data.body,
+                    inReplyTo: data.inReplyTo,
+                    references: data.references,
+                  });
+                  logger.info(
+                    { to: data.to, subject: data.subject, sourceGroup },
+                    'Email draft created via IPC',
+                  );
+                } catch (err) {
+                  logger.error(
+                    { err, to: data.to, sourceGroup },
+                    'Failed to create email draft via IPC',
                   );
                 }
               }
@@ -731,6 +869,17 @@ async function connectWhatsApp(): Promise<void> {
       });
       startIpcWatcher();
       startMessageLoop();
+
+      // Start email channel if configured
+      if (EMAIL_ENABLED && EMAIL_CONFIG) {
+        emailChannel = new EmailChannel(EMAIL_CONFIG, {
+          processEmails,
+        });
+        emailChannel.start().catch((err) =>
+          logger.error({ err }, 'Email channel failed to start'),
+        );
+        startEmailSummaryTimer();
+      }
     }
   });
 

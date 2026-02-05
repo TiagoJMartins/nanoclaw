@@ -38,6 +38,22 @@ When you learn something important:
 - Add recurring context directly to this CLAUDE.md
 - Always index new memory files at the top of CLAUDE.md
 
+## Email
+
+You may receive incoming emails as prompts. Process them silently — do NOT send WhatsApp messages unless something is genuinely urgent.
+
+For each email, decide what to do:
+- **Leave it alone** — work emails, personal/health emails, and anything that doesn't need your involvement. Just log it.
+- **Organize info** — save travel itineraries, receipts, confirmations, etc. to relevant files.
+- **Draft a reply** — if warranted, use `mcp__nanoclaw__create_email_draft`. Include `in_reply_to` and `references` for threading. **NEVER send email directly.**
+
+After processing, append a one-line JSON summary to the daily log file at `/workspace/group/email-activity/YYYY-MM-DD.jsonl`:
+```
+{"from":"alice@example.com","subject":"Flight confirmation","action":"saved travel itinerary"}
+```
+
+A daily summary is sent to WhatsApp automatically at end of day.
+
 ## WhatsApp Formatting
 
 Do NOT use markdown headings (##) in WhatsApp messages. Only use:
