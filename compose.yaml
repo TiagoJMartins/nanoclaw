@@ -1,0 +1,70 @@
+# NanoClaw Docker Compose
+#
+# Usage:
+#   1. Copy .env.example to .env and fill in your credentials
+#   2. Run: docker compose up -d
+#   3. First run: docker compose exec nanoclaw node dist/whatsapp-auth.js
+#      Then scan the QR code with WhatsApp
+#
+# The server spawns agent containers for each message, so it needs
+# access to the Docker socket.
+
+services:
+  nanoclaw:
+    image: ghcr.io/tiagojmartins/nanoclaw-server:latest
+    container_name: nanoclaw
+    restart: unless-stopped
+
+    volumes:
+      # Persistent data
+      - ./store:/app/store
+      - ./auth:/app/auth
+      - ./groups:/app/groups
+
+      # Docker socket to spawn agent containers
+      - /var/run/docker.sock:/var/run/docker.sock
+
+      # Mount allowlist (optional, for extra file access)
+      - ${HOME}/.config/nanoclaw:/root/.config/nanoclaw
+
+    environment:
+      # Required: Anthropic API key for agent
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+
+      # Assistant name (triggers on "@Andy" by default)
+      - ASSISTANT_NAME=${ASSISTANT_NAME:-Andy}
+
+      # Container settings
+      - CONTAINER_IMAGE=${CONTAINER_IMAGE:-ghcr.io/tiagojmartins/nanoclaw-agent:latest}
+      - CONTAINER_RUNTIME=${CONTAINER_RUNTIME:-docker}
+      - CONTAINER_TIMEOUT=${CONTAINER_TIMEOUT:-300000}
+
+      # Timezone
+      - TZ=${TZ:-Europe/Lisbon}
+
+      # Pushover notifications (optional)
+      - PUSHOVER_USER_KEY=${PUSHOVER_USER_KEY:-}
+      - PUSHOVER_APP_TOKEN=${PUSHOVER_APP_TOKEN:-}
+      - PUSHOVER_DEVICE=${PUSHOVER_DEVICE:-}
+
+      # iCloud Calendar (optional)
+      - ICLOUD_USERNAME=${ICLOUD_USERNAME:-}
+      - ICLOUD_APP_PASSWORD=${ICLOUD_APP_PASSWORD:-}
+      - ICLOUD_CALENDARS=${ICLOUD_CALENDARS:-}
+
+      # Email channel (optional)
+      - EMAIL_ENABLED=${EMAIL_ENABLED:-false}
+      - EMAIL_IMAP_HOST=${EMAIL_IMAP_HOST:-}
+      - EMAIL_IMAP_PORT=${EMAIL_IMAP_PORT:-993}
+      - EMAIL_USER=${EMAIL_USER:-}
+      - EMAIL_PASS=${EMAIL_PASS:-}
+      - EMAIL_ADDRESS=${EMAIL_ADDRESS:-}
+      - EMAIL_FOLDERS=${EMAIL_FOLDERS:-INBOX}
+      - EMAIL_PROCESSED_FOLDER=${EMAIL_PROCESSED_FOLDER:-}
+      - EMAIL_DRAFTS_FOLDER=${EMAIL_DRAFTS_FOLDER:-Drafts}
+      - EMAIL_FROM_NAME=${EMAIL_FROM_NAME:-}
+
+    # Run as root to access Docker socket
+    # The app itself runs safely, but needs socket access
+    user: root
+

@@ -8,6 +8,7 @@ dist/
 store/
 data/
 logs/
+auth/
 
 # Secrets
 *.keys.json
