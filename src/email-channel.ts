@@ -129,7 +129,6 @@ class ImapWatcher {
     if (!uids || uids.length === 0) return;
 
     const batch: IncomingEmail[] = [];
-    const processedUids: number[] = [];
 
     for (const uid of uids) {
       try {
@@ -194,8 +193,6 @@ class ImapWatcher {
         await this.client.messageFlagsAdd(String(uid), ['\\Seen'], {
           uid: true,
         });
-        processedUids.push(uid);
-
         logger.info(
           { from: email.from, subject: email.subject, folder: this.folder },
           'New email received',
@@ -211,28 +208,13 @@ class ImapWatcher {
     }
 
     // Send entire batch to the agent in one call
+    // Emails stay in the inbox (marked as Seen) — the DB prevents reprocessing
     if (batch.length > 0) {
       logger.info(
         { count: batch.length, folder: this.folder },
         'Processing email batch',
       );
       await this.onEmails(batch);
-
-      // Move all processed emails to processed folder
-      for (const uid of processedUids) {
-        try {
-          await this.client.messageMove(
-            String(uid),
-            this.config.processedFolder,
-            { uid: true },
-          );
-        } catch (moveErr) {
-          logger.warn(
-            { err: moveErr, uid },
-            'Failed to move email to processed folder',
-          );
-        }
-      }
     }
   }
 
@@ -296,11 +278,10 @@ export class EmailChannel {
   }
 
   async start(): Promise<void> {
-    // Ensure monitored and processed folders exist
+    // Ensure monitored folders exist
     for (const folder of this.config.monitoredFolders) {
       await this.ensureFolder(folder);
     }
-    await this.ensureFolder(this.config.processedFolder);
 
     // Start a watcher per monitored folder
     for (const folder of this.config.monitoredFolders) {

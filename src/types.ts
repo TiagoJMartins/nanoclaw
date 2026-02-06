@@ -88,7 +88,6 @@ export interface EmailConfig {
   };
   address: string;
   monitoredFolders: string[];
-  processedFolder: string;
   draftsFolder: string;
   fromName: string;
 }

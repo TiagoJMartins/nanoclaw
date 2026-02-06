@@ -107,8 +107,6 @@ export const EMAIL_CONFIG: EmailConfig | null = EMAIL_ENABLED
       monitoredFolders: (process.env.EMAIL_FOLDERS || 'INBOX')
         .split(',')
         .map((f) => f.trim()),
-      processedFolder:
-        process.env.EMAIL_PROCESSED_FOLDER || 'INBOX.NanoClaw.Processed',
       draftsFolder: process.env.EMAIL_DRAFTS_FOLDER || 'Drafts',
       fromName: process.env.EMAIL_FROM_NAME || ASSISTANT_NAME,
     }
