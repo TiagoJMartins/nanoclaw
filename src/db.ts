@@ -398,3 +398,78 @@ export function markEmailProcessed(messageId: string, folder: string): void {
     'INSERT OR IGNORE INTO processed_emails (message_id, folder, processed_at) VALUES (?, ?, ?)',
   ).run(messageId, folder, new Date().toISOString());
 }
+
+// Message compaction
+export function getChatsWithOldMessages(cutoff: string): string[] {
+  return (
+    db
+      .prepare(
+        `SELECT DISTINCT chat_jid FROM messages
+       WHERE timestamp < ? AND sender_name != '[compacted]'`,
+      )
+      .all(cutoff) as { chat_jid: string }[]
+  ).map((r) => r.chat_jid);
+}
+
+export function getOldMessages(chatJid: string, cutoff: string): NewMessage[] {
+  return db
+    .prepare(
+      `SELECT id, chat_jid, sender, sender_name, content, timestamp, is_from_me
+     FROM messages
+     WHERE chat_jid = ? AND timestamp < ? AND sender_name != '[compacted]'
+     ORDER BY timestamp`,
+    )
+    .all(chatJid, cutoff) as NewMessage[];
+}
+
+export function getCompactionSummaries(chatJid: string): NewMessage[] {
+  return db
+    .prepare(
+      `SELECT id, chat_jid, sender, sender_name, content, timestamp, is_from_me
+     FROM messages
+     WHERE chat_jid = ? AND sender_name = '[compacted]'
+     ORDER BY timestamp`,
+    )
+    .all(chatJid) as NewMessage[];
+}
+
+export function compactOldMessages(
+  chatJid: string,
+  cutoff: string,
+  summaryContent: string,
+): void {
+  const doCompact = db.transaction(() => {
+    const latest = db
+      .prepare(
+        `SELECT MAX(timestamp) as ts FROM messages
+       WHERE chat_jid = ? AND timestamp < ? AND sender_name != '[compacted]'`,
+      )
+      .get(chatJid, cutoff) as { ts: string | null };
+
+    if (!latest.ts) return;
+
+    db.prepare(
+      `DELETE FROM messages
+     WHERE chat_jid = ? AND timestamp < ? AND sender_name != '[compacted]'`,
+    ).run(chatJid, cutoff);
+
+    db.prepare(
+      `INSERT INTO messages (id, chat_jid, sender, sender_name, content, timestamp, is_from_me)
+     VALUES (?, ?, 'system', '[compacted]', ?, ?, 0)`,
+    ).run(`compacted-${Date.now()}`, chatJid, summaryContent, latest.ts);
+  });
+  doCompact();
+}
+
+// TTL cleanup for non-message tables
+export function deleteOldTaskRunLogs(cutoff: string): number {
+  return db
+    .prepare('DELETE FROM task_run_logs WHERE run_at < ?')
+    .run(cutoff).changes;
+}
+
+export function deleteOldProcessedEmails(cutoff: string): number {
+  return db
+    .prepare('DELETE FROM processed_emails WHERE processed_at < ?')
+    .run(cutoff).changes;
+}
