@@ -26,6 +26,7 @@ export interface SchedulerDependencies {
   sendMessage: (jid: string, text: string) => Promise<void>;
   registeredGroups: () => Record<string, RegisteredGroup>;
   getSessions: () => Record<string, string>;
+  getPreferredJid: (groupFolder: string) => string | undefined;
 }
 
 async function runTask(
@@ -92,7 +93,7 @@ async function runTask(
       prompt: task.prompt,
       sessionId,
       groupFolder: task.group_folder,
-      chatJid: task.chat_jid,
+      chatJid: deps.getPreferredJid(task.group_folder) ?? task.chat_jid,
       isMain,
       triggerSource: 'scheduled_task',
     });

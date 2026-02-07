@@ -148,6 +148,18 @@ function saveState(): void {
   saveJson(path.join(DATA_DIR, 'sessions.json'), sessions);
 }
 
+/**
+ * Get the preferred JID for a group folder.
+ * When multiple channels map to the same folder, prefer Telegram.
+ */
+function getPreferredJid(groupFolder: string): string | undefined {
+  const entries = Object.entries(registeredGroups).filter(
+    ([, g]) => g.folder === groupFolder,
+  );
+  if (entries.length === 0) return undefined;
+  return (entries.find(([jid]) => jid.startsWith('tg:')) ?? entries[0])[0];
+}
+
 function registerGroup(jid: string, group: RegisteredGroup): void {
   registeredGroups[jid] = group;
   saveJson(path.join(DATA_DIR, 'registered_groups.json'), registeredGroups);
@@ -407,15 +419,13 @@ async function processEmails(emails: IncomingEmail[]): Promise<void> {
   if (emails.length === 0) return;
 
   // Find the main group entry — emails always route through main
-  const mainEntry = Object.entries(registeredGroups).find(
-    ([, g]) => g.folder === MAIN_GROUP_FOLDER,
-  );
-  if (!mainEntry) {
+  const mainJid = getPreferredJid(MAIN_GROUP_FOLDER);
+  if (!mainJid) {
     logger.warn('Cannot process emails: main group not registered');
     return;
   }
 
-  const [mainJid, mainGroup] = mainEntry;
+  const mainGroup = registeredGroups[mainJid];
 
   const escapeXml = (s: string) =>
     s
@@ -544,9 +554,7 @@ async function sendDailyEmailSummary(): Promise<void> {
 
   if (!fs.existsSync(logFile)) return;
 
-  const mainJid = Object.entries(registeredGroups).find(
-    ([, g]) => g.folder === MAIN_GROUP_FOLDER,
-  )?.[0];
+  const mainJid = getPreferredJid(MAIN_GROUP_FOLDER);
   if (!mainJid) return;
 
   try {
@@ -794,9 +802,7 @@ async function processTaskIpc(
         }
 
         // Resolve the correct JID for the target group (don't trust IPC payload)
-        const targetJid = Object.entries(registeredGroups).find(
-          ([, group]) => group.folder === targetGroup,
-        )?.[0];
+        const targetJid = getPreferredJid(targetGroup);
 
         if (!targetJid) {
           logger.warn(
@@ -1196,6 +1202,7 @@ async function main(): Promise<void> {
     sendMessage,
     registeredGroups: () => registeredGroups,
     getSessions: () => sessions,
+    getPreferredJid,
   });
   startIpcWatcher();
   startMessageLoop();
