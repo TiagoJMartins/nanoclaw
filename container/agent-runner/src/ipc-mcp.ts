@@ -12,6 +12,32 @@ import { CronExpressionParser } from 'cron-parser';
 const IPC_DIR = '/workspace/ipc';
 const MESSAGES_DIR = path.join(IPC_DIR, 'messages');
 const TASKS_DIR = path.join(IPC_DIR, 'tasks');
+const EMAIL_RESULTS_DIR = path.join(IPC_DIR, 'email_results');
+
+async function waitForEmailResult(
+  requestId: string,
+  maxWait = 30000,
+): Promise<{ success: boolean; data?: unknown; error?: string }> {
+  const resultFile = path.join(EMAIL_RESULTS_DIR, `${requestId}.json`);
+  const pollInterval = 500;
+  let elapsed = 0;
+
+  while (elapsed < maxWait) {
+    if (fs.existsSync(resultFile)) {
+      try {
+        const result = JSON.parse(fs.readFileSync(resultFile, 'utf-8'));
+        fs.unlinkSync(resultFile);
+        return result;
+      } catch (err) {
+        return { success: false, error: `Failed to read result: ${err}` };
+      }
+    }
+    await new Promise((resolve) => setTimeout(resolve, pollInterval));
+    elapsed += pollInterval;
+  }
+
+  return { success: false, error: 'Request timed out' };
+}
 
 type TriggerSource = 'user' | 'email' | 'scheduled_task';
 
@@ -20,6 +46,7 @@ export interface IpcMcpContext {
   groupFolder: string;
   isMain: boolean;
   triggerSource: TriggerSource;
+  emailEnabled: boolean;
 }
 
 function writeIpcFile(dir: string, data: object): string {
@@ -36,8 +63,337 @@ function writeIpcFile(dir: string, data: object): string {
   return filename;
 }
 
+function generateRequestId(): string {
+  return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
 export function createIpcMcp(ctx: IpcMcpContext) {
-  const { chatJid, groupFolder, isMain } = ctx;
+  const { chatJid, groupFolder, isMain, emailEnabled } = ctx;
+
+  const emailTools = emailEnabled
+    ? [
+        tool(
+          'list_email_folders',
+          'List all mailbox folders with message counts and special use flags. Use this to discover the folder structure before searching or moving emails.',
+          {},
+          async () => {
+            const requestId = generateRequestId();
+            writeIpcFile(MESSAGES_DIR, {
+              type: 'list_email_folders',
+              requestId,
+              groupFolder,
+              timestamp: new Date().toISOString(),
+            });
+
+            const result = await waitForEmailResult(requestId);
+            if (!result.success) {
+              return {
+                content: [
+                  { type: 'text', text: `Error: ${result.error}` },
+                ],
+                isError: true,
+              };
+            }
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify(result.data, null, 2),
+                },
+              ],
+            };
+          },
+        ),
+
+        tool(
+          'search_emails',
+          `Search emails in a mailbox folder. Returns summaries (not full bodies).
+Use get_email to fetch the full body of a specific email.
+
+Search criteria are ANDed together. Returns up to 50 results by default, sorted newest first.`,
+          {
+            folder: z
+              .string()
+              .default('INBOX')
+              .describe('Mailbox folder to search (default: INBOX)'),
+            from: z
+              .string()
+              .optional()
+              .describe('Filter by sender address or name'),
+            to: z
+              .string()
+              .optional()
+              .describe('Filter by recipient address'),
+            subject: z
+              .string()
+              .optional()
+              .describe('Filter by subject (substring match)'),
+            body: z
+              .string()
+              .optional()
+              .describe('Filter by body text (substring match)'),
+            since: z
+              .string()
+              .optional()
+              .describe(
+                'Emails after this date (ISO 8601, e.g. "2026-02-01")',
+              ),
+            before: z
+              .string()
+              .optional()
+              .describe('Emails before this date (ISO 8601)'),
+            flagged: z
+              .boolean()
+              .optional()
+              .describe('Filter by flagged/starred status'),
+            seen: z
+              .boolean()
+              .optional()
+              .describe(
+                'Filter by read/unread status (true=read, false=unread)',
+              ),
+            limit: z
+              .number()
+              .min(1)
+              .max(100)
+              .default(50)
+              .describe('Maximum results to return (default: 50)'),
+          },
+          async (args) => {
+            const requestId = generateRequestId();
+            writeIpcFile(MESSAGES_DIR, {
+              type: 'search_emails',
+              requestId,
+              groupFolder,
+              folder: args.folder,
+              criteria: {
+                from: args.from,
+                to: args.to,
+                subject: args.subject,
+                body: args.body,
+                since: args.since,
+                before: args.before,
+                flagged: args.flagged,
+                seen: args.seen,
+              },
+              limit: args.limit,
+              timestamp: new Date().toISOString(),
+            });
+
+            const result = await waitForEmailResult(requestId, 60000);
+            if (!result.success) {
+              return {
+                content: [
+                  { type: 'text', text: `Error: ${result.error}` },
+                ],
+                isError: true,
+              };
+            }
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify(result.data, null, 2),
+                },
+              ],
+            };
+          },
+        ),
+
+        tool(
+          'get_email',
+          'Fetch the full details of a specific email by UID, including the text body. Use search_emails first to find the UID.',
+          {
+            folder: z
+              .string()
+              .describe('Mailbox folder containing the email'),
+            uid: z
+              .number()
+              .describe('Email UID (from search_emails results)'),
+          },
+          async (args) => {
+            const requestId = generateRequestId();
+            writeIpcFile(MESSAGES_DIR, {
+              type: 'get_email',
+              requestId,
+              groupFolder,
+              folder: args.folder,
+              uid: args.uid,
+              timestamp: new Date().toISOString(),
+            });
+
+            const result = await waitForEmailResult(requestId, 15000);
+            if (!result.success) {
+              return {
+                content: [
+                  { type: 'text', text: `Error: ${result.error}` },
+                ],
+                isError: true,
+              };
+            }
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify(result.data, null, 2),
+                },
+              ],
+            };
+          },
+        ),
+
+        tool(
+          'move_emails',
+          `Move emails from one folder to another.
+Common destinations: "Archive", "Trash", "INBOX", or any custom folder.
+The destination folder will be created if it doesn't exist.`,
+          {
+            folder: z.string().describe('Source mailbox folder'),
+            uids: z
+              .array(z.number())
+              .min(1)
+              .describe('Array of email UIDs to move'),
+            destination: z
+              .string()
+              .describe(
+                'Destination folder (e.g., "Archive", "Trash")',
+              ),
+          },
+          async (args) => {
+            const requestId = generateRequestId();
+            writeIpcFile(MESSAGES_DIR, {
+              type: 'move_emails',
+              requestId,
+              groupFolder,
+              folder: args.folder,
+              uids: args.uids,
+              destination: args.destination,
+              timestamp: new Date().toISOString(),
+            });
+
+            const result = await waitForEmailResult(requestId);
+            if (!result.success) {
+              return {
+                content: [
+                  { type: 'text', text: `Error: ${result.error}` },
+                ],
+                isError: true,
+              };
+            }
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: `Moved ${args.uids.length} email(s) to "${args.destination}"`,
+                },
+              ],
+            };
+          },
+        ),
+
+        tool(
+          'flag_emails',
+          `Add or remove flags on emails. Common operations:
+- Star/unstar: flag="\\Flagged", action="add"/"remove"
+- Mark read: flag="\\Seen", action="add"
+- Mark unread: flag="\\Seen", action="remove"`,
+          {
+            folder: z
+              .string()
+              .describe('Mailbox folder containing the emails'),
+            uids: z
+              .array(z.number())
+              .min(1)
+              .describe('Array of email UIDs to flag'),
+            flag: z
+              .string()
+              .describe(
+                'Flag to add/remove (e.g., "\\\\Flagged", "\\\\Seen")',
+              ),
+            action: z
+              .enum(['add', 'remove'])
+              .describe('Whether to add or remove the flag'),
+          },
+          async (args) => {
+            const requestId = generateRequestId();
+            writeIpcFile(MESSAGES_DIR, {
+              type: 'flag_emails',
+              requestId,
+              groupFolder,
+              folder: args.folder,
+              uids: args.uids,
+              flag: args.flag,
+              action: args.action,
+              timestamp: new Date().toISOString(),
+            });
+
+            const result = await waitForEmailResult(requestId);
+            if (!result.success) {
+              return {
+                content: [
+                  { type: 'text', text: `Error: ${result.error}` },
+                ],
+                isError: true,
+              };
+            }
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: `${args.action === 'add' ? 'Added' : 'Removed'} flag "${args.flag}" on ${args.uids.length} email(s)`,
+                },
+              ],
+            };
+          },
+        ),
+
+        tool(
+          'delete_emails',
+          `Permanently delete emails. This marks them as \\Deleted and expunges.
+Consider using move_emails to Trash instead for recoverable deletion.`,
+          {
+            folder: z
+              .string()
+              .describe('Mailbox folder containing the emails'),
+            uids: z
+              .array(z.number())
+              .min(1)
+              .describe(
+                'Array of email UIDs to permanently delete',
+              ),
+          },
+          async (args) => {
+            const requestId = generateRequestId();
+            writeIpcFile(MESSAGES_DIR, {
+              type: 'delete_emails',
+              requestId,
+              groupFolder,
+              folder: args.folder,
+              uids: args.uids,
+              timestamp: new Date().toISOString(),
+            });
+
+            const result = await waitForEmailResult(requestId);
+            if (!result.success) {
+              return {
+                content: [
+                  { type: 'text', text: `Error: ${result.error}` },
+                ],
+                isError: true,
+              };
+            }
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: `Permanently deleted ${args.uids.length} email(s) from "${args.folder}"`,
+                },
+              ],
+            };
+          },
+        ),
+      ]
+    : [];
 
   return createSdkMcpServer({
     name: 'nanoclaw',
@@ -482,6 +838,8 @@ Use available_groups.json to find the JID for a group. The folder name should be
           };
         },
       ),
+
+      ...emailTools,
     ],
   });
 }

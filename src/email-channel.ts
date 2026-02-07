@@ -3,12 +3,97 @@
  *
  * Monitors IMAP folders for incoming emails and passes them to the agent.
  * Can create draft replies via IMAP APPEND. Never sends email directly.
+ * Provides inbox management operations (search, move, flag, delete).
  */
 import { ImapFlow } from 'imapflow';
 
 import { EmailConfig, IncomingEmail } from './types.js';
 import { isEmailProcessed, markEmailProcessed } from './db.js';
 import { logger } from './logger.js';
+
+export interface SearchCriteria {
+  from?: string;
+  to?: string;
+  subject?: string;
+  body?: string;
+  since?: string;
+  before?: string;
+  flagged?: boolean;
+  seen?: boolean;
+}
+
+export interface EmailSummary {
+  uid: number;
+  from: string;
+  fromName: string;
+  to: string[];
+  subject: string;
+  date: string;
+  flags: string[];
+  size: number;
+}
+
+export interface EmailDetail extends EmailSummary {
+  cc: string[];
+  messageId: string;
+  inReplyTo?: string;
+  body: string;
+}
+
+export interface FolderInfo {
+  path: string;
+  name: string;
+  specialUse?: string;
+  messages?: number;
+  unseen?: number;
+}
+
+function createImapClient(config: EmailConfig): ImapFlow {
+  return new ImapFlow({
+    host: config.imap.host,
+    port: config.imap.port,
+    secure: config.imap.tls,
+    auth: config.imap.auth,
+    logger: false,
+  });
+}
+
+function findTextPart(structure: any): any {
+  if (!structure) return null;
+  if (structure.type === 'text/plain') return structure;
+  if (structure.childNodes) {
+    for (const child of structure.childNodes) {
+      const found = findTextPart(child);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
+async function downloadTextBody(
+  client: ImapFlow,
+  uid: number,
+  bodyStructure: any,
+): Promise<string> {
+  try {
+    const part = findTextPart(bodyStructure);
+    const partId = part?.part || '1';
+
+    const { content } = await client.download(String(uid), partId, {
+      uid: true,
+    });
+    const chunks: Buffer[] = [];
+    for await (const chunk of content) {
+      chunks.push(chunk as Buffer);
+    }
+    const text = Buffer.concat(chunks).toString('utf-8');
+    return text.length > 10000
+      ? text.slice(0, 10000) + '\n[...truncated]'
+      : text;
+  } catch {
+    return '(unable to extract email body)';
+  }
+}
 
 export interface EmailDraft {
   to: string;
@@ -39,17 +124,7 @@ class ImapWatcher {
     this.config = config;
     this.folder = folder;
     this.onEmails = onEmails;
-    this.client = this.createClient();
-  }
-
-  private createClient(): ImapFlow {
-    return new ImapFlow({
-      host: this.config.imap.host,
-      port: this.config.imap.port,
-      secure: this.config.imap.tls,
-      auth: this.config.imap.auth,
-      logger: false,
-    });
+    this.client = createImapClient(this.config);
   }
 
   async start(): Promise<void> {
@@ -60,7 +135,7 @@ class ImapWatcher {
   private async connectAndWatch(): Promise<void> {
     while (this.running) {
       try {
-        this.client = this.createClient();
+        this.client = createImapClient(this.config);
         await this.client.connect();
         logger.info({ folder: this.folder }, 'IMAP connected');
         this.reconnectDelay = 5000;
@@ -154,7 +229,7 @@ class ImapWatcher {
         }
 
         // Download plain text body
-        const body = await this.downloadTextBody(uid, msg.bodyStructure);
+        const body = await downloadTextBody(this.client, uid, msg.bodyStructure);
 
         const email: IncomingEmail = {
           uid,
@@ -218,44 +293,6 @@ class ImapWatcher {
     }
   }
 
-  private async downloadTextBody(
-    uid: number,
-    bodyStructure: any,
-  ): Promise<string> {
-    try {
-      // Find the text/plain part
-      const part = this.findTextPart(bodyStructure);
-      const partId = part?.part || '1';
-
-      const { content } = await this.client.download(String(uid), partId, {
-        uid: true,
-      });
-      const chunks: Buffer[] = [];
-      for await (const chunk of content) {
-        chunks.push(chunk as Buffer);
-      }
-      const text = Buffer.concat(chunks).toString('utf-8');
-      // Truncate very long emails
-      return text.length > 10000
-        ? text.slice(0, 10000) + '\n[...truncated]'
-        : text;
-    } catch {
-      return '(unable to extract email body)';
-    }
-  }
-
-  private findTextPart(structure: any): any {
-    if (!structure) return null;
-    if (structure.type === 'text/plain') return structure;
-    if (structure.childNodes) {
-      for (const child of structure.childNodes) {
-        const found = this.findTextPart(child);
-        if (found) return found;
-      }
-    }
-    return null;
-  }
-
   async stop(): Promise<void> {
     this.running = false;
     try {
@@ -270,7 +307,6 @@ export class EmailChannel {
   private watchers: ImapWatcher[] = [];
   private config: EmailConfig;
   private deps: EmailChannelDeps;
-  private draftClient: ImapFlow | null = null;
 
   constructor(config: EmailConfig, deps: EmailChannelDeps) {
     this.config = config;
@@ -304,14 +340,7 @@ export class EmailChannel {
   }
 
   private async ensureFolder(folderPath: string): Promise<void> {
-    const client = new ImapFlow({
-      host: this.config.imap.host,
-      port: this.config.imap.port,
-      secure: this.config.imap.tls,
-      auth: this.config.imap.auth,
-      logger: false,
-    });
-
+    const client = createImapClient(this.config);
     try {
       await client.connect();
       try {
@@ -332,14 +361,7 @@ export class EmailChannel {
   }
 
   async createDraft(draft: EmailDraft): Promise<void> {
-    const client = new ImapFlow({
-      host: this.config.imap.host,
-      port: this.config.imap.port,
-      secure: this.config.imap.tls,
-      auth: this.config.imap.auth,
-      logger: false,
-    });
-
+    const client = createImapClient(this.config);
     try {
       await client.connect();
 
@@ -367,7 +389,6 @@ export class EmailChannel {
   }
 
   private buildRfc822(draft: EmailDraft): string {
-    const boundary = `----=_Part_${Date.now()}`;
     const date = new Date().toUTCString();
     const msgId = `<${Date.now()}.${Math.random().toString(36).slice(2)}@${this.config.address.split('@')[1]}>`;
 
@@ -388,6 +409,250 @@ export class EmailChannel {
     }
 
     return `${headers}\r\n${draft.body}\r\n`;
+  }
+
+  async listFolders(): Promise<FolderInfo[]> {
+    const client = createImapClient(this.config);
+    try {
+      await client.connect();
+      const folders = await client.list({
+        statusQuery: { messages: true, unseen: true },
+      } as any);
+      await client.logout();
+      return folders.map((f) => ({
+        path: f.path,
+        name: f.name,
+        specialUse: f.specialUse || undefined,
+        messages: f.status?.messages,
+        unseen: f.status?.unseen,
+      }));
+    } catch (err) {
+      logger.error({ err }, 'Failed to list email folders');
+      try {
+        client.close();
+      } catch {
+        /* ignore */
+      }
+      throw err;
+    }
+  }
+
+  async searchEmails(
+    folder: string,
+    criteria: SearchCriteria,
+    limit: number,
+  ): Promise<EmailSummary[]> {
+    const client = createImapClient(this.config);
+    try {
+      await client.connect();
+      const lock = await client.getMailboxLock(folder);
+      try {
+        const query: Record<string, unknown> = {};
+        if (criteria.from) query.from = criteria.from;
+        if (criteria.to) query.to = criteria.to;
+        if (criteria.subject) query.subject = criteria.subject;
+        if (criteria.body) query.body = criteria.body;
+        if (criteria.since) query.since = new Date(criteria.since);
+        if (criteria.before) query.before = new Date(criteria.before);
+        if (criteria.flagged !== undefined) query.flagged = criteria.flagged;
+        if (criteria.seen !== undefined) query.seen = criteria.seen;
+        if (Object.keys(query).length === 0) query.all = true;
+
+        const uids = await client.search(query as any, { uid: true });
+        if (!uids || uids.length === 0) return [];
+
+        // Highest UIDs = newest
+        const sortedUids = [...uids].sort((a, b) => b - a).slice(0, limit);
+        const uidRange = sortedUids.join(',');
+
+        const messages = await client.fetchAll(
+          uidRange,
+          { envelope: true, flags: true, size: true, uid: true } as any,
+          { uid: true },
+        );
+
+        return messages
+          .map((msg) => ({
+            uid: msg.uid,
+            from: msg.envelope?.from?.[0]?.address || '',
+            fromName:
+              msg.envelope?.from?.[0]?.name ||
+              msg.envelope?.from?.[0]?.address ||
+              '',
+            to: (msg.envelope?.to || [])
+              .map((a: any) => a.address || '')
+              .filter(Boolean),
+            subject: msg.envelope?.subject || '(no subject)',
+            date: msg.envelope?.date?.toISOString?.() || '',
+            flags: [...(msg.flags || [])],
+            size: msg.size || 0,
+          }))
+          .sort(
+            (a, b) =>
+              new Date(b.date).getTime() - new Date(a.date).getTime(),
+          );
+      } finally {
+        lock.release();
+      }
+    } catch (err) {
+      logger.error({ err, folder }, 'Failed to search emails');
+      try {
+        client.close();
+      } catch {
+        /* ignore */
+      }
+      throw err;
+    }
+  }
+
+  async getEmail(folder: string, uid: number): Promise<EmailDetail> {
+    const client = createImapClient(this.config);
+    try {
+      await client.connect();
+      const lock = await client.getMailboxLock(folder);
+      try {
+        const msg = await client.fetchOne(
+          String(uid),
+          {
+            envelope: true,
+            bodyStructure: true,
+            flags: true,
+            size: true,
+            uid: true,
+          } as any,
+          { uid: true },
+        );
+
+        if (!msg || !msg.envelope) {
+          throw new Error(`Email with UID ${uid} not found in ${folder}`);
+        }
+
+        const body = await downloadTextBody(client, uid, msg.bodyStructure);
+
+        return {
+          uid,
+          from: msg.envelope.from?.[0]?.address || '',
+          fromName:
+            msg.envelope.from?.[0]?.name ||
+            msg.envelope.from?.[0]?.address ||
+            '',
+          to: (msg.envelope.to || [])
+            .map((a: any) => a.address || '')
+            .filter(Boolean),
+          cc: (msg.envelope.cc || [])
+            .map((a: any) => a.address || '')
+            .filter(Boolean),
+          subject: msg.envelope.subject || '(no subject)',
+          date: msg.envelope.date?.toISOString?.() || '',
+          messageId: msg.envelope.messageId || '',
+          inReplyTo: msg.envelope.inReplyTo || undefined,
+          flags: [...(msg.flags || [])],
+          size: msg.size || 0,
+          body,
+        };
+      } finally {
+        lock.release();
+      }
+    } catch (err) {
+      logger.error({ err, folder, uid }, 'Failed to get email');
+      try {
+        client.close();
+      } catch {
+        /* ignore */
+      }
+      throw err;
+    }
+  }
+
+  async moveEmails(
+    folder: string,
+    uids: number[],
+    destination: string,
+  ): Promise<void> {
+    const client = createImapClient(this.config);
+    try {
+      await client.connect();
+      try {
+        await client.mailboxCreate(destination);
+      } catch {
+        // Already exists
+      }
+      const lock = await client.getMailboxLock(folder);
+      try {
+        await client.messageMove(uids.join(','), destination, { uid: true });
+        logger.info({ folder, count: uids.length, destination }, 'Emails moved');
+      } finally {
+        lock.release();
+      }
+      await client.logout();
+    } catch (err) {
+      logger.error({ err, folder, destination }, 'Failed to move emails');
+      try {
+        client.close();
+      } catch {
+        /* ignore */
+      }
+      throw err;
+    }
+  }
+
+  async flagEmails(
+    folder: string,
+    uids: number[],
+    flag: string,
+    action: 'add' | 'remove',
+  ): Promise<void> {
+    const client = createImapClient(this.config);
+    try {
+      await client.connect();
+      const lock = await client.getMailboxLock(folder);
+      try {
+        const uidRange = uids.join(',');
+        if (action === 'add') {
+          await client.messageFlagsAdd(uidRange, [flag], { uid: true });
+        } else {
+          await client.messageFlagsRemove(uidRange, [flag], { uid: true });
+        }
+        logger.info(
+          { folder, count: uids.length, flag, action },
+          'Email flags updated',
+        );
+      } finally {
+        lock.release();
+      }
+      await client.logout();
+    } catch (err) {
+      logger.error({ err, folder, flag, action }, 'Failed to update email flags');
+      try {
+        client.close();
+      } catch {
+        /* ignore */
+      }
+      throw err;
+    }
+  }
+
+  async deleteEmails(folder: string, uids: number[]): Promise<void> {
+    const client = createImapClient(this.config);
+    try {
+      await client.connect();
+      const lock = await client.getMailboxLock(folder);
+      try {
+        await client.messageDelete(uids.join(','), { uid: true });
+        logger.info({ folder, count: uids.length }, 'Emails deleted');
+      } finally {
+        lock.release();
+      }
+      await client.logout();
+    } catch (err) {
+      logger.error({ err, folder }, 'Failed to delete emails');
+      try {
+        client.close();
+      } catch {
+        /* ignore */
+      }
+      throw err;
+    }
   }
 
   async stop(): Promise<void> {

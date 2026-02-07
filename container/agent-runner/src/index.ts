@@ -243,11 +243,14 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
+  const emailEnabled = process.env.EMAIL_ENABLED === 'true';
+
   const ipcMcp = createIpcMcp({
     chatJid: input.chatJid,
     groupFolder: input.groupFolder,
     isMain: input.isMain,
     triggerSource: input.triggerSource,
+    emailEnabled,
   });
 
   // Build MCP servers config

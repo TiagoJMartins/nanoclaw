@@ -603,6 +603,19 @@ function startIpcWatcher(): void {
   const ipcBaseDir = path.join(DATA_DIR, 'ipc');
   fs.mkdirSync(ipcBaseDir, { recursive: true });
 
+  const writeEmailResult = (
+    sourceGroup: string,
+    requestId: string,
+    result: { success: boolean; data?: unknown; error?: string },
+  ): void => {
+    const resultsDir = path.join(ipcBaseDir, sourceGroup, 'email_results');
+    fs.mkdirSync(resultsDir, { recursive: true });
+    const tempPath = path.join(resultsDir, `${requestId}.json.tmp`);
+    const finalPath = path.join(resultsDir, `${requestId}.json`);
+    fs.writeFileSync(tempPath, JSON.stringify(result));
+    fs.renameSync(tempPath, finalPath);
+  };
+
   const processIpcFiles = async () => {
     // Scan all group IPC directories (identity determined by directory)
     let groupFolders: string[];
@@ -691,6 +704,127 @@ function startIpcWatcher(): void {
                     { err, to: data.to, sourceGroup },
                     'Failed to create email draft via IPC',
                   );
+                }
+              } else if (
+                data.type === 'list_email_folders' &&
+                emailChannel &&
+                data.requestId
+              ) {
+                try {
+                  const folders = await emailChannel.listFolders();
+                  writeEmailResult(sourceGroup, data.requestId, {
+                    success: true,
+                    data: folders,
+                  });
+                } catch (err) {
+                  writeEmailResult(sourceGroup, data.requestId, {
+                    success: false,
+                    error:
+                      err instanceof Error ? err.message : String(err),
+                  });
+                }
+              } else if (
+                data.type === 'search_emails' &&
+                emailChannel &&
+                data.requestId
+              ) {
+                try {
+                  const results = await emailChannel.searchEmails(
+                    data.folder || 'INBOX',
+                    data.criteria || {},
+                    data.limit || 50,
+                  );
+                  writeEmailResult(sourceGroup, data.requestId, {
+                    success: true,
+                    data: results,
+                  });
+                } catch (err) {
+                  writeEmailResult(sourceGroup, data.requestId, {
+                    success: false,
+                    error:
+                      err instanceof Error ? err.message : String(err),
+                  });
+                }
+              } else if (
+                data.type === 'get_email' &&
+                emailChannel &&
+                data.requestId
+              ) {
+                try {
+                  const email = await emailChannel.getEmail(
+                    data.folder,
+                    data.uid,
+                  );
+                  writeEmailResult(sourceGroup, data.requestId, {
+                    success: true,
+                    data: email,
+                  });
+                } catch (err) {
+                  writeEmailResult(sourceGroup, data.requestId, {
+                    success: false,
+                    error:
+                      err instanceof Error ? err.message : String(err),
+                  });
+                }
+              } else if (
+                data.type === 'move_emails' &&
+                emailChannel &&
+                data.requestId
+              ) {
+                try {
+                  await emailChannel.moveEmails(
+                    data.folder,
+                    data.uids,
+                    data.destination,
+                  );
+                  writeEmailResult(sourceGroup, data.requestId, {
+                    success: true,
+                  });
+                } catch (err) {
+                  writeEmailResult(sourceGroup, data.requestId, {
+                    success: false,
+                    error:
+                      err instanceof Error ? err.message : String(err),
+                  });
+                }
+              } else if (
+                data.type === 'flag_emails' &&
+                emailChannel &&
+                data.requestId
+              ) {
+                try {
+                  await emailChannel.flagEmails(
+                    data.folder,
+                    data.uids,
+                    data.flag,
+                    data.action,
+                  );
+                  writeEmailResult(sourceGroup, data.requestId, {
+                    success: true,
+                  });
+                } catch (err) {
+                  writeEmailResult(sourceGroup, data.requestId, {
+                    success: false,
+                    error:
+                      err instanceof Error ? err.message : String(err),
+                  });
+                }
+              } else if (
+                data.type === 'delete_emails' &&
+                emailChannel &&
+                data.requestId
+              ) {
+                try {
+                  await emailChannel.deleteEmails(data.folder, data.uids);
+                  writeEmailResult(sourceGroup, data.requestId, {
+                    success: true,
+                  });
+                } catch (err) {
+                  writeEmailResult(sourceGroup, data.requestId, {
+                    success: false,
+                    error:
+                      err instanceof Error ? err.message : String(err),
+                  });
                 }
               }
               fs.unlinkSync(filePath);

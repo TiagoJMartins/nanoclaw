@@ -13,6 +13,7 @@ import {
   CONTAINER_RUNTIME,
   CONTAINER_TIMEOUT,
   DATA_DIR,
+  EMAIL_ENABLED,
   GROUPS_DIR,
   ICLOUD_APP_PASSWORD,
   ICLOUD_CALENDAR_ENABLED,
@@ -232,6 +233,11 @@ export async function runContainerAgent(
   // Pass Parcel API key to main channel containers only
   if (input.isMain && PARCEL_API_KEY) {
     envVars.PARCEL_API_KEY = PARCEL_API_KEY!;
+  }
+
+  // Pass email enabled flag to main channel containers only
+  if (input.isMain && EMAIL_ENABLED) {
+    envVars.EMAIL_ENABLED = 'true';
   }
 
   // Pass Pushover credentials to main channel containers only
