@@ -14,13 +14,15 @@ import { createIpcMcp } from './ipc-mcp.js';
 import { createCalendarMcp } from './calendar-mcp.js';
 import { createPushoverMcp } from './pushover-mcp.js';
 
+type TriggerSource = 'user' | 'email' | 'scheduled_task';
+
 interface ContainerInput {
   prompt: string;
   sessionId?: string;
   groupFolder: string;
   chatJid: string;
   isMain: boolean;
-  isScheduledTask?: boolean;
+  triggerSource: TriggerSource;
 }
 
 interface ContainerOutput {
@@ -230,7 +232,7 @@ async function main(): Promise<void> {
   try {
     const stdinData = await readStdin();
     input = JSON.parse(stdinData);
-    log(`Received input for group: ${input.groupFolder}`);
+    log(`Received input for group: ${input.groupFolder} (trigger: ${input.triggerSource})`);
   } catch (err) {
     writeOutput({
       status: 'error',
@@ -244,6 +246,7 @@ async function main(): Promise<void> {
     chatJid: input.chatJid,
     groupFolder: input.groupFolder,
     isMain: input.isMain,
+    triggerSource: input.triggerSource,
   });
 
   // Build MCP servers config
@@ -293,10 +296,12 @@ async function main(): Promise<void> {
   let result: string | null = null;
   let newSessionId: string | undefined;
 
-  // Add context for scheduled tasks
+  // Add context prefix for non-user triggers
   let prompt = input.prompt;
-  if (input.isScheduledTask) {
+  if (input.triggerSource === 'scheduled_task') {
     prompt = `[SCHEDULED TASK - You are running automatically, not in response to a user message. Use mcp__nanoclaw__send_message if needed to communicate with the user.]\n\n${input.prompt}`;
+  } else if (input.triggerSource === 'email') {
+    prompt = `[EMAIL TRIGGER - You are processing incoming emails, not responding to a direct user message. Use mcp__nanoclaw__send_message if needed to communicate with the user.]\n\n${input.prompt}`;
   }
 
   try {

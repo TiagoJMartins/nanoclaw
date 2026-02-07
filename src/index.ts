@@ -33,6 +33,7 @@ import type { IncomingEmail } from './types.js';
 import {
   AvailableGroup,
   runContainerAgent,
+  TriggerSource,
   writeGroupsSnapshot,
   writeTasksSnapshot,
 } from './container-runner.js';
@@ -296,6 +297,7 @@ async function runAgent(
   group: RegisteredGroup,
   prompt: string,
   chatJid: string,
+  triggerSource: TriggerSource = 'user',
 ): Promise<string | null> {
   const isMain = group.folder === MAIN_GROUP_FOLDER;
   const sessionId = sessions[group.folder];
@@ -332,6 +334,7 @@ async function runAgent(
       groupFolder: group.folder,
       chatJid,
       isMain,
+      triggerSource,
     });
 
     if (output.newSessionId) {
@@ -492,7 +495,7 @@ Example log entries:
   }
 
   const startTime = Date.now();
-  await runAgent(mainGroup, prompt, mainJid);
+  await runAgent(mainGroup, prompt, mainJid, 'email');
   const durationSec = Math.round((Date.now() - startTime) / 1000);
 
   // Read agent's action log to include in notification

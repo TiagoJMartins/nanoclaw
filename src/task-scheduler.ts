@@ -94,7 +94,7 @@ async function runTask(
       groupFolder: task.group_folder,
       chatJid: task.chat_jid,
       isMain,
-      isScheduledTask: true,
+      triggerSource: 'scheduled_task',
     });
 
     if (output.status === 'error') {

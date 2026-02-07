@@ -43,13 +43,15 @@ function getHomeDir(): string {
   return home;
 }
 
+export type TriggerSource = 'user' | 'email' | 'scheduled_task';
+
 export interface ContainerInput {
   prompt: string;
   sessionId?: string;
   groupFolder: string;
   chatJid: string;
   isMain: boolean;
-  isScheduledTask?: boolean;
+  triggerSource: TriggerSource;
 }
 
 export interface ContainerOutput {
@@ -211,9 +213,10 @@ export async function runContainerAgent(
 
   const mounts = buildVolumeMounts(group, input.isMain);
 
-  // Pass timezone to all containers for correct date handling
+  // Pass timezone and trigger source to all containers
   const envVars: Record<string, string> = {
     TZ: TIMEZONE,
+    TRIGGER_SOURCE: input.triggerSource,
   };
 
   // Pass iCloud credentials to main channel containers only

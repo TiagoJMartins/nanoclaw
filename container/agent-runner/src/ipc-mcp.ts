@@ -13,10 +13,13 @@ const IPC_DIR = '/workspace/ipc';
 const MESSAGES_DIR = path.join(IPC_DIR, 'messages');
 const TASKS_DIR = path.join(IPC_DIR, 'tasks');
 
+type TriggerSource = 'user' | 'email' | 'scheduled_task';
+
 export interface IpcMcpContext {
   chatJid: string;
   groupFolder: string;
   isMain: boolean;
+  triggerSource: TriggerSource;
 }
 
 function writeIpcFile(dir: string, data: object): string {

@@ -569,7 +569,7 @@ async function runEmailAgent(
     groupFolder,
     chatJid: `email:${email.from}`,  // Use email: prefix for JID
     isMain: false,
-    isScheduledTask: false
+    triggerSource: 'email'
   });
 
   if (output.newSessionId) {
