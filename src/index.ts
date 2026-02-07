@@ -11,6 +11,7 @@ import makeWASocket, {
 
 import {
   ASSISTANT_NAME,
+  CONTAINER_POOL_ENABLED,
   CONTAINER_RUNTIME,
   DATA_DIR,
   EMAIL_CONFIG,
@@ -30,8 +31,10 @@ import {
 import { EmailChannel } from './email-channel.js';
 import { TelegramChannel } from './telegram-channel.js';
 import type { IncomingEmail } from './types.js';
+import { shutdownPool, warmContainer } from './container-pool.js';
 import {
   AvailableGroup,
+  prepareContainer,
   runContainerAgent,
   TriggerSource,
   writeGroupsSnapshot,
@@ -118,6 +121,26 @@ async function setTyping(jid: string, isTyping: boolean): Promise<void> {
     }
   } catch (err) {
     logger.debug({ jid, err }, 'Failed to update typing status');
+  }
+}
+
+function warmRegisteredGroups(): void {
+  if (!CONTAINER_POOL_ENABLED) return;
+
+  const warmedFolders = new Set<string>();
+  for (const group of Object.values(registeredGroups)) {
+    if (warmedFolders.has(group.folder)) continue;
+    warmedFolders.add(group.folder);
+    const isMain = group.folder === MAIN_GROUP_FOLDER;
+    try {
+      const { containerArgs } = prepareContainer(group, isMain);
+      warmContainer(group.folder, containerArgs);
+    } catch (err) {
+      logger.warn({ group: group.name, err }, 'Failed to warm container');
+    }
+  }
+  if (warmedFolders.size > 0) {
+    logger.info({ count: warmedFolders.size }, 'Container pool warmed');
   }
 }
 
@@ -1158,6 +1181,7 @@ async function main(): Promise<void> {
   initDatabase();
   logger.info('Database initialized');
   loadState();
+  warmRegisteredGroups();
 
   // Start Telegram channel if configured
   if (TELEGRAM_ENABLED && TELEGRAM_BOT_TOKEN) {
@@ -1221,6 +1245,7 @@ async function main(): Promise<void> {
 
 function shutdown(): void {
   logger.info('Shutting down...');
+  shutdownPool();
   if (telegramChannel) telegramChannel.stop();
   process.exit(0);
 }

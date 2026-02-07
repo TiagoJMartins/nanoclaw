@@ -101,6 +101,14 @@ import type { EmailConfig } from './types.js';
 
 export const EMAIL_ENABLED = process.env.EMAIL_ENABLED === 'true';
 
+// Container pool (pre-warms containers to eliminate spawn latency)
+export const CONTAINER_POOL_ENABLED =
+  process.env.CONTAINER_POOL_ENABLED !== 'false';
+export const CONTAINER_POOL_MAX_IDLE = parseInt(
+  process.env.CONTAINER_POOL_MAX_IDLE || '0',
+  10,
+); // 0 = no eviction (always keep warm), >0 = evict after N ms
+
 export const EMAIL_CONFIG: EmailConfig | null = EMAIL_ENABLED
   ? {
       imap: {
