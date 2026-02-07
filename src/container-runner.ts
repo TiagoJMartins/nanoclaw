@@ -10,6 +10,7 @@ import path from 'path';
 import {
   CONTAINER_IMAGE,
   CONTAINER_MAX_OUTPUT_SIZE,
+  CONTAINER_POOL_ENABLED,
   CONTAINER_RUNTIME,
   CONTAINER_TIMEOUT,
   DATA_DIR,
@@ -26,6 +27,7 @@ import {
   TELEGRAM_BOT_USERNAME,
   TIMEZONE,
 } from './config.js';
+import { acquireWarmContainer, warmContainer } from './container-pool.js';
 import { logger } from './logger.js';
 import { validateAdditionalMounts } from './mount-security.js';
 import { RegisteredGroup } from './types.js';
@@ -203,25 +205,10 @@ function buildContainerArgs(
   return args;
 }
 
-export async function runContainerAgent(
-  group: RegisteredGroup,
-  input: ContainerInput,
-): Promise<ContainerOutput> {
-  const startTime = Date.now();
+function buildEnvVars(isMain: boolean): Record<string, string> {
+  const envVars: Record<string, string> = { TZ: TIMEZONE };
 
-  const groupDir = path.join(GROUPS_DIR, group.folder);
-  fs.mkdirSync(groupDir, { recursive: true });
-
-  const mounts = buildVolumeMounts(group, input.isMain);
-
-  // Pass timezone and trigger source to all containers
-  const envVars: Record<string, string> = {
-    TZ: TIMEZONE,
-    TRIGGER_SOURCE: input.triggerSource,
-  };
-
-  // Pass iCloud credentials to main channel containers only
-  if (input.isMain && ICLOUD_CALENDAR_ENABLED) {
+  if (isMain && ICLOUD_CALENDAR_ENABLED) {
     envVars.ICLOUD_USERNAME = ICLOUD_USERNAME!;
     envVars.ICLOUD_APP_PASSWORD = ICLOUD_APP_PASSWORD!;
     if (ICLOUD_CALENDARS) {
@@ -229,13 +216,11 @@ export async function runContainerAgent(
     }
   }
 
-  // Pass Parcel API key to main channel containers only
-  if (input.isMain && PARCEL_API_KEY) {
+  if (isMain && PARCEL_API_KEY) {
     envVars.PARCEL_API_KEY = PARCEL_API_KEY!;
   }
 
-  // Pass Pushover credentials to main channel containers only
-  if (input.isMain && PUSHOVER_ENABLED) {
+  if (isMain && PUSHOVER_ENABLED) {
     envVars.PUSHOVER_USER_KEY = PUSHOVER_USER_KEY!;
     envVars.PUSHOVER_APP_TOKEN = PUSHOVER_APP_TOKEN!;
     if (PUSHOVER_DEVICE) {
@@ -246,7 +231,35 @@ export async function runContainerAgent(
     }
   }
 
+  return envVars;
+}
+
+export interface PreparedContainer {
+  containerArgs: string[];
+  mounts: VolumeMount[];
+}
+
+export function prepareContainer(
+  group: RegisteredGroup,
+  isMain: boolean,
+): PreparedContainer {
+  const groupDir = path.join(GROUPS_DIR, group.folder);
+  fs.mkdirSync(groupDir, { recursive: true });
+
+  const mounts = buildVolumeMounts(group, isMain);
+  const envVars = buildEnvVars(isMain);
   const containerArgs = buildContainerArgs(mounts, envVars);
+
+  return { containerArgs, mounts };
+}
+
+export async function runContainerAgent(
+  group: RegisteredGroup,
+  input: ContainerInput,
+): Promise<ContainerOutput> {
+  const startTime = Date.now();
+
+  const { containerArgs, mounts } = prepareContainer(group, input.isMain);
 
   logger.debug(
     {
@@ -260,32 +273,38 @@ export async function runContainerAgent(
     'Container mount configuration',
   );
 
+  // Try warm container first, fall back to cold start
+  let container = acquireWarmContainer(group.folder);
+  const isWarm = !!container;
+  if (!container) {
+    container = spawn(CONTAINER_RUNTIME, containerArgs, {
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+  }
+
   logger.info(
     {
       group: group.name,
       mountCount: mounts.length,
       isMain: input.isMain,
+      warm: isWarm,
     },
-    'Spawning container agent',
+    isWarm ? 'Dispatching to warm container' : 'Spawning cold container',
   );
 
   const logsDir = path.join(GROUPS_DIR, group.folder, 'logs');
   fs.mkdirSync(logsDir, { recursive: true });
 
   return new Promise((resolve) => {
-    const container = spawn(CONTAINER_RUNTIME, containerArgs, {
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
-
     let stdout = '';
     let stderr = '';
     let stdoutTruncated = false;
     let stderrTruncated = false;
 
-    container.stdin.write(JSON.stringify(input));
-    container.stdin.end();
+    container.stdin!.write(JSON.stringify(input));
+    container.stdin!.end();
 
-    container.stdout.on('data', (data) => {
+    container.stdout!.on('data', (data) => {
       if (stdoutTruncated) return;
       const chunk = data.toString();
       const remaining = CONTAINER_MAX_OUTPUT_SIZE - stdout.length;
@@ -301,7 +320,7 @@ export async function runContainerAgent(
       }
     });
 
-    container.stderr.on('data', (data) => {
+    container.stderr!.on('data', (data) => {
       const chunk = data.toString();
       const lines = chunk.trim().split('\n');
       for (const line of lines) {
@@ -347,6 +366,7 @@ export async function runContainerAgent(
         `IsMain: ${input.isMain}`,
         `Duration: ${duration}ms`,
         `Exit Code: ${code}`,
+        `Warm Start: ${isWarm}`,
         `Stdout Truncated: ${stdoutTruncated}`,
         `Stderr Truncated: ${stderrTruncated}`,
         ``,
@@ -399,6 +419,8 @@ export async function runContainerAgent(
       fs.writeFileSync(logFile, logLines.join('\n'));
       logger.debug({ logFile, verbose: isVerbose }, 'Container log written');
 
+      let output: ContainerOutput;
+
       if (code !== 0) {
         logger.error(
           {
@@ -411,58 +433,70 @@ export async function runContainerAgent(
           'Container exited with error',
         );
 
-        resolve({
+        output = {
           status: 'error',
           result: null,
           error: `Container exited with code ${code}: ${stderr.slice(-200)}`,
-        });
-        return;
+        };
+      } else {
+        try {
+          // Extract JSON between sentinel markers for robust parsing
+          const startIdx = stdout.indexOf(OUTPUT_START_MARKER);
+          const endIdx = stdout.indexOf(OUTPUT_END_MARKER);
+
+          let jsonLine: string;
+          if (startIdx !== -1 && endIdx !== -1 && endIdx > startIdx) {
+            jsonLine = stdout
+              .slice(startIdx + OUTPUT_START_MARKER.length, endIdx)
+              .trim();
+          } else {
+            // Fallback: last non-empty line (backwards compatibility)
+            const lines = stdout.trim().split('\n');
+            jsonLine = lines[lines.length - 1];
+          }
+
+          output = JSON.parse(jsonLine);
+
+          logger.info(
+            {
+              group: group.name,
+              duration,
+              status: output.status,
+              hasResult: !!output.result,
+            },
+            'Container completed',
+          );
+        } catch (err) {
+          logger.error(
+            {
+              group: group.name,
+              stdout: stdout.slice(-500),
+              error: err,
+            },
+            'Failed to parse container output',
+          );
+
+          output = {
+            status: 'error',
+            result: null,
+            error: `Failed to parse container output: ${err instanceof Error ? err.message : String(err)}`,
+          };
+        }
       }
 
-      try {
-        // Extract JSON between sentinel markers for robust parsing
-        const startIdx = stdout.indexOf(OUTPUT_START_MARKER);
-        const endIdx = stdout.indexOf(OUTPUT_END_MARKER);
+      resolve(output);
 
-        let jsonLine: string;
-        if (startIdx !== -1 && endIdx !== -1 && endIdx > startIdx) {
-          jsonLine = stdout
-            .slice(startIdx + OUTPUT_START_MARKER.length, endIdx)
-            .trim();
-        } else {
-          // Fallback: last non-empty line (backwards compatibility)
-          const lines = stdout.trim().split('\n');
-          jsonLine = lines[lines.length - 1];
+      // Re-warm a container for this group so the next invocation is fast
+      if (CONTAINER_POOL_ENABLED) {
+        try {
+          const prepared = prepareContainer(group, input.isMain);
+          warmContainer(group.folder, prepared.containerArgs);
+        } catch (err) {
+          logger.warn(
+            { group: group.name, err },
+            'Failed to re-warm container',
+          );
         }
-
-        const output: ContainerOutput = JSON.parse(jsonLine);
-
-        logger.info(
-          {
-            group: group.name,
-            duration,
-            status: output.status,
-            hasResult: !!output.result,
-          },
-          'Container completed',
-        );
-
-        resolve(output);
-      } catch (err) {
-        logger.error(
-          {
-            group: group.name,
-            stdout: stdout.slice(-500),
-            error: err,
-          },
-          'Failed to parse container output',
-        );
-
-        resolve({
-          status: 'error',
-          result: null,
-          error: `Failed to parse container output: ${err instanceof Error ? err.message : String(err)}`,
-        });
       }
     });
 
