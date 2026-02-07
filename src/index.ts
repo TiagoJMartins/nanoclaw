@@ -54,6 +54,10 @@ import {
   storeMessage,
   updateChatName,
 } from './db.js';
+import {
+  startCompactionLoop,
+  stopCompactionLoop,
+} from './message-compaction.js';
 import { startSchedulerLoop } from './task-scheduler.js';
 import { NewMessage, RegisteredGroup, Session } from './types.js';
 import { loadJson, saveJson } from './utils.js';
@@ -1230,6 +1234,7 @@ async function main(): Promise<void> {
   });
   startIpcWatcher();
   startMessageLoop();
+  startCompactionLoop();
 
   // Start email channel if configured
   if (EMAIL_ENABLED && EMAIL_CONFIG) {
@@ -1245,6 +1250,7 @@ async function main(): Promise<void> {
 
 function shutdown(): void {
   logger.info('Shutting down...');
+  stopCompactionLoop();
   shutdownPool();
   if (telegramChannel) telegramChannel.stop();
   process.exit(0);

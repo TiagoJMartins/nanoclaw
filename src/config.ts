@@ -7,7 +7,7 @@ export const POLL_INTERVAL = 2000;
 export const SCHEDULER_POLL_INTERVAL = 60000;
 
 // Absolute paths needed for container mounts
-const PROJECT_ROOT = process.cwd();
+export const PROJECT_ROOT = process.cwd();
 const HOME_DIR = process.env.HOME || process.env.USERPROFILE || os.homedir();
 
 // Mount security: allowlist stored OUTSIDE project root, never mounted into containers
@@ -100,6 +100,14 @@ export const PARCEL_API_KEY = process.env.PARCEL_API_KEY;
 import type { EmailConfig } from './types.js';
 
 export const EMAIL_ENABLED = process.env.EMAIL_ENABLED === 'true';
+
+// Message compaction (AI-powered summarization of old messages)
+export const MESSAGE_COMPACTION_ENABLED =
+  process.env.MESSAGE_COMPACTION_ENABLED === 'true';
+export const MESSAGE_RETENTION_DAYS = parseInt(
+  process.env.MESSAGE_RETENTION_DAYS || '30',
+  10,
+);
 
 // Container pool (pre-warms containers to eliminate spawn latency)
 export const CONTAINER_POOL_ENABLED =
