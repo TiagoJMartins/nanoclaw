@@ -4,87 +4,54 @@ import path from 'path';
 
 import { proto } from '@whiskeysockets/baileys';
 
-import { STORE_DIR } from './config.js';
+import { PROJECT_ROOT, STORE_DIR } from './config.js';
 import { NewMessage, ScheduledTask, TaskRunLog } from './types.js';
 
 let db: Database.Database;
+
+function runMigrations(): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS _migrations (
+      name TEXT PRIMARY KEY,
+      applied_at TEXT NOT NULL
+    )
+  `);
+
+  const migrationsDir = path.join(PROJECT_ROOT, 'migrations');
+  if (!fs.existsSync(migrationsDir)) return;
+
+  const files = fs
+    .readdirSync(migrationsDir)
+    .filter((f) => f.endsWith('.sql'))
+    .sort();
+
+  const applied = new Set(
+    (db.prepare('SELECT name FROM _migrations').all() as { name: string }[]).map(
+      (r) => r.name,
+    ),
+  );
+
+  const applyMigration = db.transaction((file: string, sql: string) => {
+    db.exec(sql);
+    db.prepare('INSERT INTO _migrations (name, applied_at) VALUES (?, ?)').run(
+      file,
+      new Date().toISOString(),
+    );
+  });
+
+  for (const file of files) {
+    if (applied.has(file)) continue;
+    const sql = fs.readFileSync(path.join(migrationsDir, file), 'utf-8');
+    applyMigration(file, sql);
+  }
+}
 
 export function initDatabase(): void {
   const dbPath = path.join(STORE_DIR, 'messages.db');
   fs.mkdirSync(path.dirname(dbPath), { recursive: true });
 
   db = new Database(dbPath);
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS chats (
-      jid TEXT PRIMARY KEY,
-      name TEXT,
-      last_message_time TEXT
-    );
-    CREATE TABLE IF NOT EXISTS messages (
-      id TEXT,
-      chat_jid TEXT,
-      sender TEXT,
-      sender_name TEXT,
-      content TEXT,
-      timestamp TEXT,
-      is_from_me INTEGER,
-      PRIMARY KEY (id, chat_jid),
-      FOREIGN KEY (chat_jid) REFERENCES chats(jid)
-    );
-    CREATE INDEX IF NOT EXISTS idx_timestamp ON messages(timestamp);
-
-    CREATE TABLE IF NOT EXISTS scheduled_tasks (
-      id TEXT PRIMARY KEY,
-      group_folder TEXT NOT NULL,
-      chat_jid TEXT NOT NULL,
-      prompt TEXT NOT NULL,
-      schedule_type TEXT NOT NULL,
-      schedule_value TEXT NOT NULL,
-      next_run TEXT,
-      last_run TEXT,
-      last_result TEXT,
-      status TEXT DEFAULT 'active',
-      created_at TEXT NOT NULL
-    );
-    CREATE INDEX IF NOT EXISTS idx_next_run ON scheduled_tasks(next_run);
-    CREATE INDEX IF NOT EXISTS idx_status ON scheduled_tasks(status);
-
-    CREATE TABLE IF NOT EXISTS task_run_logs (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      task_id TEXT NOT NULL,
-      run_at TEXT NOT NULL,
-      duration_ms INTEGER NOT NULL,
-      status TEXT NOT NULL,
-      result TEXT,
-      error TEXT,
-      FOREIGN KEY (task_id) REFERENCES scheduled_tasks(id)
-    );
-    CREATE INDEX IF NOT EXISTS idx_task_run_logs ON task_run_logs(task_id, run_at);
-  `);
-
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS processed_emails (
-      message_id TEXT PRIMARY KEY,
-      folder TEXT NOT NULL,
-      processed_at TEXT NOT NULL
-    );
-  `);
-
-  // Add sender_name column if it doesn't exist (migration for existing DBs)
-  try {
-    db.exec(`ALTER TABLE messages ADD COLUMN sender_name TEXT`);
-  } catch {
-    /* column already exists */
-  }
-
-  // Add context_mode column if it doesn't exist (migration for existing DBs)
-  try {
-    db.exec(
-      `ALTER TABLE scheduled_tasks ADD COLUMN context_mode TEXT DEFAULT 'isolated'`,
-    );
-  } catch {
-    /* column already exists */
-  }
+  runMigrations();
 }
 
 /**
